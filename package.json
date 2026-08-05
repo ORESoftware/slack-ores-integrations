@@ -16,13 +16,15 @@
     "test:e2e": "npm run test:e2e:cli && npm run test:e2e:browser",
     "test:e2e:cli": "node --test --test-concurrency=1 tests/e2e/cli/*.test.js",
     "test:e2e:browser": "node --test --test-concurrency=1 tests/e2e/browser/*.test.js",
-    "test:all": "npm run dependencies:check && npm run manifest:check && npm run check && npm run lint && npm run test:unit && npm run test:e2e",
+    "test:all": "npm run dependencies:check && npm run manifest:check && npm run provenance:check && npm run check && npm run lint && npm run test:unit && npm run test:e2e",
     "check": "node scripts/check-js-syntax.mjs",
     "lint": "biome lint .",
     "lint:fix": "biome lint --write .",
     "manifest:generate": "node scripts/generate-manifest.mjs",
     "manifest:check": "node scripts/generate-manifest.mjs --check",
-    "validate": "npm run dependencies:check && npm run manifest:check && npm run check && npm run lint && npm test",
+    "provenance:check": "node scripts/check-provenance.mjs",
+    "artifacts:build": "node scripts/build-source-artifacts.mjs",
+    "validate": "npm run dependencies:check && npm run manifest:check && npm run provenance:check && npm run check && npm run lint && npm test",
     "dependencies:check": "node scripts/check-dependency-pins.mjs"
   },
   "dependencies": {
