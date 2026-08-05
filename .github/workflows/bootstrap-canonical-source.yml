@@ -1,0 +1,244 @@
+name: Bootstrap canonical Slack integration source
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/bootstrap-canonical-source.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: slack-ores-integrations-bootstrap
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOSITORY: ORESoftware/devops-slack
+  SOURCE_SHA: 7d7b6f2a1018204eba8b727ffa069e6bef31b6a7
+  FEATURE_BRANCH: agent/den-1602-canonicalize-repository
+  RUNTIME_REPOSITORY: ORESoftware/ai-agent-bridge.rs
+  RUNTIME_REVISION: 03f38e876daec61eba587f6cb87393d3cc2a7dac
+  npm_config_audit: "false"
+  npm_config_fund: "false"
+  npm_config_ignore_scripts: "true"
+  npm_config_package_lock: "false"
+  npm_config_update_notifier: "false"
+
+jobs:
+  publish:
+    if: github.repository == 'ORESoftware/slack-ores-integrations'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out target repository
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out immutable reviewed source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ORESoftware/devops-slack
+          ref: 7d7b6f2a1018204eba8b727ffa069e6bef31b6a7
+          path: source
+          persist-credentials: false
+          show-progress: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Verify GitHub CLI authentication and immutable inputs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh auth status
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git -C source status --porcelain)"
+          test "$(gh api repos/${GITHUB_REPOSITORY} --jq '.full_name')" = "$GITHUB_REPOSITORY"
+          test "$(gh api repos/${SOURCE_REPOSITORY}/commits/${SOURCE_SHA} --jq '.sha')" = "$SOURCE_SHA"
+
+      - name: Validate exact reviewed source before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm --prefix source install
+          npm --prefix source run dependencies:check
+          npm --prefix source run manifest:check
+          npm --prefix source run check
+          npm --prefix source run lint
+          npm --prefix source test
+
+      - name: Locate preinstalled Chrome and ChromeDriver
+        id: browser
+        shell: bash
+        run: |
+          set -euo pipefail
+          chrome_path="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || true)"
+          chromedriver_path="$(command -v chromedriver || true)"
+          if [[ -z "$chromedriver_path" ]]; then
+            driver_root="${CHROMEWEBDRIVER:-/usr/local/share/chromedriver-linux64}"
+            chromedriver_path="$(find "$driver_root" -maxdepth 1 -type f -name chromedriver -perm -111 -print -quit 2>/dev/null || true)"
+          fi
+          [[ -n "$chrome_path" && -x "$chrome_path" ]] || { echo "::error::Chrome executable not found"; exit 1; }
+          [[ -n "$chromedriver_path" && -x "$chromedriver_path" ]] || { echo "::error::ChromeDriver executable not found"; exit 1; }
+          "$chrome_path" --version
+          "$chromedriver_path" --version
+          echo "chrome-path=$chrome_path" >> "$GITHUB_OUTPUT"
+          echo "chromedriver-path=$chromedriver_path" >> "$GITHUB_OUTPUT"
+
+      - name: Materialize canonical branch and runtime ownership contract
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C target switch -c "$FEATURE_BRANCH"
+          rsync -a --delete --exclude='.git' source/ target/
+
+          mkdir -p target/config target/docs target/test
+          cat > target/config/runtime-integration.json <<JSON
+          {
+            "schema_version": 1,
+            "source": {
+              "repository": "${SOURCE_REPOSITORY}",
+              "revision": "${SOURCE_SHA}"
+            },
+            "production_runtime": {
+              "repository": "${RUNTIME_REPOSITORY}",
+              "revision": "${RUNTIME_REVISION}",
+              "signed_ingress": {
+                "endpoints": {
+                  "anthropic": "/slack/commands/ores-claude",
+                  "openai": "/slack/commands/ores-chatgpt"
+                },
+                "aliases": {
+                  "/ores-claude": "/slack/commands/ores-claude",
+                  "/x-claude": "/slack/commands/ores-claude",
+                  "/my-claude": "/slack/commands/ores-claude",
+                  "/ores-chatgpt": "/slack/commands/ores-chatgpt",
+                  "/x-chatgpt": "/slack/commands/ores-chatgpt",
+                  "/my-chatgpt": "/slack/commands/ores-chatgpt"
+                }
+              }
+            },
+            "deployment": {
+              "repository": "ORESoftware/k8s-cluster",
+              "path": "remote/argocd/dd-next-runtime/dd-ai-agent-bridge.deployment.yaml"
+            }
+          }
+          JSON
+
+          cat > target/docs/runtime-ownership.md <<DOC
+          # Runtime ownership
+
+          This repository owns the Slack app manifest, local Slack CLI and Socket Mode workflow, command aliases, configuration validation, and compatibility tests for \`alex-main-agent\`.
+
+          Production signed HTTP ingress, authorization, durable runs, Linear/GitHub dispatch, and Kubernetes operation remain owned by [\`${RUNTIME_REPOSITORY}@${RUNTIME_REVISION}\`](https://github.com/${RUNTIME_REPOSITORY}/commit/${RUNTIME_REVISION}). The two canonical signed command endpoints are:
+
+          - Anthropic/Claude: \`/slack/commands/ores-claude\`
+          - OpenAI/ChatGPT: \`/slack/commands/ores-chatgpt\`
+
+          All six \`/ores-*\`, \`/x-*\`, and \`/my-*\` aliases map by provider to those two endpoints. Local \`slack run\` development does not imply or replace the Kubernetes production deployment in \`ORESoftware/k8s-cluster\`.
+          DOC
+
+          cat > target/test/runtime-ownership.test.js <<'TEST'
+          import assert from "node:assert/strict";
+          import fs from "node:fs";
+          import test from "node:test";
+
+          const commands = JSON.parse(
+            fs.readFileSync(new URL("../config/commands.json", import.meta.url), "utf8")
+          );
+          const runtime = JSON.parse(
+            fs.readFileSync(new URL("../config/runtime-integration.json", import.meta.url), "utf8")
+          );
+
+          const expectedAliases = {
+            "/ores-claude": ["anthropic", "/slack/commands/ores-claude"],
+            "/x-claude": ["anthropic", "/slack/commands/ores-claude"],
+            "/my-claude": ["anthropic", "/slack/commands/ores-claude"],
+            "/ores-chatgpt": ["openai", "/slack/commands/ores-chatgpt"],
+            "/x-chatgpt": ["openai", "/slack/commands/ores-chatgpt"],
+            "/my-chatgpt": ["openai", "/slack/commands/ores-chatgpt"]
+          };
+
+          test("production runtime and source revisions are immutable", () => {
+            assert.equal(runtime.schema_version, 1);
+            assert.equal(runtime.source.repository, "ORESoftware/devops-slack");
+            assert.equal(runtime.source.revision, "7d7b6f2a1018204eba8b727ffa069e6bef31b6a7");
+            assert.equal(runtime.production_runtime.repository, "ORESoftware/ai-agent-bridge.rs");
+            assert.equal(
+              runtime.production_runtime.revision,
+              "03f38e876daec61eba587f6cb87393d3cc2a7dac"
+            );
+          });
+
+          test("all six aliases map exactly once to the two signed ingress endpoints", () => {
+            const actualCommands = Object.fromEntries(
+              commands.map(({ command, provider }) => [command, provider])
+            );
+            const actualAliases = runtime.production_runtime.signed_ingress.aliases;
+            assert.deepEqual(Object.keys(actualCommands).sort(), Object.keys(expectedAliases).sort());
+            assert.deepEqual(Object.keys(actualAliases).sort(), Object.keys(expectedAliases).sort());
+
+            for (const [alias, [provider, endpoint]] of Object.entries(expectedAliases)) {
+              assert.equal(actualCommands[alias], provider);
+              assert.equal(actualAliases[alias], endpoint);
+              assert.equal(
+                runtime.production_runtime.signed_ingress.endpoints[provider],
+                endpoint
+              );
+            }
+          });
+          TEST
+
+          cat >> target/README.md <<DOC
+
+          ## Production runtime ownership
+
+          This repository is the canonical home for the \`alex-main-agent\` Slack manifest, local Slack CLI workflow, command aliases, and compatibility tests. Production signed ingress and durable execution remain pinned in [\`config/runtime-integration.json\`](config/runtime-integration.json) to \`${RUNTIME_REPOSITORY}@${RUNTIME_REVISION}\` and the Kubernetes deployment in \`ORESoftware/k8s-cluster\`.
+          DOC
+
+      - name: Validate the published tree including browser automation
+        shell: bash
+        working-directory: target
+        env:
+          E2E_BROWSER_PATH: ${{ steps.browser.outputs.chrome-path }}
+          E2E_CHROMEDRIVER_PATH: ${{ steps.browser.outputs.chromedriver-path }}
+          REQUIRE_E2E_DEPENDENCIES: "true"
+          SE_AVOID_STATS: "true"
+        run: |
+          set -euo pipefail
+          npm install
+          npm run test:all
+          git diff --check
+          if git grep -nE '^(<<<<<<< |=======|>>>>>>> )' -- .; then
+            echo 'git conflict marker detected' >&2
+            exit 1
+          fi
+
+      - name: Commit and push the canonical review branch
+        shell: bash
+        working-directory: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'feat: publish canonical Slack integration repository'
+          remote_url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git remote set-url origin "$remote_url"
+          git push origin "HEAD:refs/heads/${FEATURE_BRANCH}"
+          remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${FEATURE_BRANCH}" --jq '.object.sha')"
+          test "$remote_sha" = "$(git rev-parse HEAD)"
+          printf 'Published %s at %s\n' "$FEATURE_BRANCH" "$remote_sha"
