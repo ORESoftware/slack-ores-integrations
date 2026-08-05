@@ -1,0 +1,93 @@
+name: Publish reviewed Slack source branch
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/bootstrap-push-source-without-workflow.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: slack-ores-integrations-source-publication
+  cancel-in-progress: false
+
+env:
+  SOURCE_REPOSITORY: ORESoftware/devops-slack
+  SOURCE_SHA: 7d7b6f2a1018204eba8b727ffa069e6bef31b6a7
+  FEATURE_BRANCH: agent/den-1602-canonicalize-repository
+  npm_config_audit: "false"
+  npm_config_fund: "false"
+  npm_config_ignore_scripts: "true"
+  npm_config_package_lock: "false"
+  npm_config_update_notifier: "false"
+
+jobs:
+  publish:
+    if: github.repository == 'ORESoftware/slack-ores-integrations'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out target
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          path: target
+          fetch-depth: 0
+          persist-credentials: false
+          show-progress: false
+
+      - name: Check out immutable reviewed source
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: ORESoftware/devops-slack
+          ref: 7d7b6f2a1018204eba8b727ffa069e6bef31b6a7
+          path: source
+          persist-credentials: false
+          show-progress: false
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: Verify gh authentication, source identity, and source tests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh auth status
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          test -z "$(git -C source status --porcelain)"
+          test "$(gh api repos/${SOURCE_REPOSITORY}/commits/${SOURCE_SHA} --jq '.sha')" = "$SOURCE_SHA"
+          npm --prefix source install
+          npm --prefix source run dependencies:check
+          npm --prefix source run manifest:check
+          npm --prefix source run check
+          npm --prefix source test
+
+      - name: Commit and push source without a workflow mutation
+        shell: bash
+        working-directory: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git switch -c "$FEATURE_BRANCH"
+          rsync -a --delete \
+            --exclude='.git' \
+            --exclude='.github/workflows/ci.yml' \
+            ../source/ ./
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -A
+          git commit -m 'feat: publish reviewed alex-main-agent Slack source'
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push origin "HEAD:refs/heads/${FEATURE_BRANCH}"
+          remote_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/${FEATURE_BRANCH}" --jq '.object.sha')"
+          test "$remote_sha" = "$(git rev-parse HEAD)"
+          printf 'Published %s at %s\n' "$FEATURE_BRANCH" "$remote_sha"
