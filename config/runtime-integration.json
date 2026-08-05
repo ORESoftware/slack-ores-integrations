@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "source": {
+    "repository": "ORESoftware/devops-slack",
+    "revision": "7d7b6f2a1018204eba8b727ffa069e6bef31b6a7"
+  },
+  "production_runtime": {
+    "repository": "ORESoftware/ai-agent-bridge.rs",
+    "revision": "03f38e876daec61eba587f6cb87393d3cc2a7dac",
+    "signed_ingress": {
+      "endpoints": {
+        "anthropic": "/slack/commands/ores-claude",
+        "openai": "/slack/commands/ores-chatgpt"
+      },
+      "aliases": {
+        "/ores-claude": "/slack/commands/ores-claude",
+        "/x-claude": "/slack/commands/ores-claude",
+        "/my-claude": "/slack/commands/ores-claude",
+        "/ores-chatgpt": "/slack/commands/ores-chatgpt",
+        "/x-chatgpt": "/slack/commands/ores-chatgpt",
+        "/my-chatgpt": "/slack/commands/ores-chatgpt"
+      }
+    }
+  },
+  "deployment": {
+    "repository": "ORESoftware/k8s-cluster",
+    "path": "remote/argocd/dd-next-runtime/dd-ai-agent-bridge.deployment.yaml"
+  }
+}
