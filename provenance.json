@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "canonicalRepository": "ORESoftware/slack-ores-integrations",
+  "importedFrom": {
+    "repository": "ORESoftware/devops-slack",
+    "commit": "7d7b6f2a1018204eba8b727ffa069e6bef31b6a7"
+  },
+  "productionIngress": {
+    "repository": "ORESoftware/ai-agent-bridge.rs",
+    "commit": "03f38e876daec61eba587f6cb87393d3cc2a7dac"
+  },
+  "gitOps": {
+    "repository": "ORESoftware/k8s-cluster"
+  },
+  "slack": {
+    "appId": "A0BMBAMM5NJ",
+    "workspaceId": "T01B3C83PMK",
+    "commands": [
+      "/my-chatgpt",
+      "/my-claude",
+      "/ores-chatgpt",
+      "/ores-claude",
+      "/x-chatgpt",
+      "/x-claude"
+    ]
+  }
+}
