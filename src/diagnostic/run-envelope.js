@@ -22,24 +22,17 @@ const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ISSUE = /^[A-Z0-9]{2,10}-[1-9][0-9]*$/;
 const SLACK_TIMESTAMP = /^[0-9]{1,20}\.[0-9]{1,12}$/;
 
-function byteLength(value) {
+function bytes(value) {
   return Buffer.byteLength(value, "utf8");
 }
 
-function compareSlackTimestamps(left, right) {
-  const leftParts = left.split(".");
-  const rightParts = right.split(".");
-  const leftValue = BigInt(leftParts[0] ?? "0");
-  const rightValue = BigInt(rightParts[0] ?? "0");
-  if (leftValue < rightValue) return -1;
-  if (leftValue > rightValue) return 1;
-  const normalizedLeft = (leftParts[1] ?? "").padEnd(12, "0");
-  const normalizedRight = (rightParts[1] ?? "").padEnd(12, "0");
-  return normalizedLeft < normalizedRight ? -1 : normalizedLeft > normalizedRight ? 1 : 0;
-}
-
-function boundedText(value, label, maxBytes) {
-  if (typeof value !== "string" || !value.trim() || value.includes("\0") || byteLength(value) > maxBytes) {
+function boundedText(value, label, maximum) {
+  if (
+    typeof value !== "string" ||
+    !value.trim() ||
+    value.includes("\0") ||
+    bytes(value) > maximum
+  ) {
     throw new DiagnosticContractError(`${label} is invalid.`);
   }
   return value;
@@ -52,84 +45,83 @@ function identifier(value, label) {
   return value;
 }
 
-export function deterministicRunId(seed) {
-  const normalized = boundedText(seed, "Run identity seed", 8_192);
-  return `ores-${createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 24)}`;
+function compareSlackTimestamps(left, right) {
+  const [leftSeconds = "0", leftFraction = ""] = left.split(".");
+  const [rightSeconds = "0", rightFraction = ""] = right.split(".");
+  const secondsComparison = BigInt(leftSeconds) - BigInt(rightSeconds);
+  if (secondsComparison !== 0n) return secondsComparison < 0n ? -1 : 1;
+  return leftFraction.padEnd(12, "0").localeCompare(rightFraction.padEnd(12, "0"));
 }
 
-export function deterministicBridgeWorkflowId(seed) {
-  const normalized = boundedText(seed, "Workflow identity seed", 8_192);
-  return `bridge-${createHash("sha256")
-    .update(`workflow:${normalized}`, "utf8")
+export function deterministicRunId(seed) {
+  return `ores-${createHash("sha256")
+    .update(boundedText(seed, "Run identity seed", 8_192), "utf8")
     .digest("hex")
     .slice(0, 24)}`;
 }
 
-/**
- * @typedef {{ userId?: string | null, ts: string, text: string }} ChannelContextMessage
- * @typedef {{
- *   provider: "claude" | "chatgpt",
- *   action: "implement" | "investigate" | "review" | "plan" | "triage",
- *   prompt: string,
- *   workspaceId: string,
- *   channelId: string,
- *   requesterUserId: string,
- *   repository: string,
- *   linearTeamId: string,
- *   linearProjectId: string,
- *   linearRunProjectId: string,
- *   linearIssue?: string | null,
- *   writePolicy: "read_only" | "linear_only" | "draft_pull_request",
- *   contextMessages?: ChannelContextMessage[],
- *   identitySeed: string
- * }} SlackAgentRunEnvelopeInput
- */
+export function deterministicBridgeWorkflowId(seed) {
+  return `bridge-${createHash("sha256")
+    .update(`workflow:${boundedText(seed, "Workflow identity seed", 8_192)}`, "utf8")
+    .digest("hex")
+    .slice(0, 24)}`;
+}
 
-/** @param {SlackAgentRunEnvelopeInput} input */
 export function buildSlackAgentRunEnvelope(input) {
-  if (!PROVIDERS.has(input.provider)) throw new DiagnosticContractError("Provider is unsupported.");
-  if (!ACTIONS.has(input.action) throw new DiagnosticContractError(Action is unsupported.");
-  if (!WRITE_POLICIES.has(input.writePolicy)) throw new DiagnosticContractError("Write policy is unsupported.");
+  if (!input || typeof input !== "object") {
+    throw new DiagnosticContractError("Run-envelope input is required.");
+  }
+  if (!PROVIDERS.has(input.provider)) {
+    throw new DiagnosticContractError(Provider is unsupported.");
+  }
+  if (!ACTIONS.has(input.action)) {
+    throw new DiagnosticContractError("Action is unsupported.");
+  }
+  if (!WRITE_POLICIES.has(input.writePolicy)) {
+    throw new DiagnosticContractError("Write policy is unsupported.");
+  }
 
   const prompt = boundedText(input.prompt, "Prompt", MAX_PROMPT_BYTES);
   const workspaceId = identifier(input.workspaceId, "Workspace ID");
   const channelId = identifier(input.channelId, "Channel ID");
   const requesterUserId = identifier(input.requesterUserId, "Requester user ID");
-  if (!REPOSITORY.test(input.repository) || input.repository.endsWith(".git") || input.repository.includes("://")) {
-    throw new DiagnosticContractError("Repository is invalid.");
+  if (
+    typeof input.repository !== "string" ||
+    !REPOSITORY.test(input.repository) ||
+    input.repository.endsWith(".git") ||
+    input.repository.includes("://")
+  ) {
+    throw new DiagnosticContractError(Repository is invalid.");
   }
-
   const linearTeamId = identifier(input.linearTeamId, "Linear team ID");
   const linearProjectId = identifier(input.linearProjectId, "Linear project ID");
   const linearRunProjectId = identifier(input.linearRunProjectId, "Linear run project ID");
   if (input.linearIssue != null && !ISSUE.test(input.linearIssue)) {
-    throw new DiagnosticContractError("Linear issue identifier is invalid.");
+    throw new DiagnosticContractError(Linear issue identifier is invalid.");
   }
 
   const contextMessages = input.contextMessages ?? [];
   if (!Array.isArray(contextMessages) || contextMessages.length > MAX_CONTEXT_MESSAGES) {
     throw new DiagnosticContractError("Channel context contains too many messages.");
   }
-
-  let contextBytes = 0;
+  let totalBytes = 0;
   let previousTimestamp = "";
   const messages = contextMessages.map((message, index) => {
-    if (!message || typeof message !== "object") {
+    if (!message || typeof message !== "object" || !SLACK_TIMESTAMP.test(message.ts)) {
       throw new DiagnosticContractError(`Channel context message ${index} is invalid.`);
     }
-    const timestamp = typeof message.ts === "string" && SLACK_TIMESTAMP.test(message.ts) ? message.ts : undefined;
-    if (!timestamp || (previousTimestamp && compareSlackTimestamps(previousTimestamp, timestamp) > 0)) {
-      throw new DiagnosticContractError("Channel context must be chronological.");
+    if (previousTimestamp && compareSlackTimestamps(previousTimestamp, message.ts) > 0) {
+      throw new DiagnosticContractError(Channel context must be chronological.");
     }
-    previousTimestamp = timestamp;
+    previousTimestamp = message.ts;
     const text = boundedText(message.text, `Channel context message ${index}`, MAX_CONTEXT_MESSAGE_BYTES);
-    contextBytes += byteLength(text);
-    if (contextBytes > MAX_CONTEXT_TOTAL_BYTES) {
-      throw new DiagnosticContractError(Channel context exceeds the total byte limit.");
+    totalBytes += bytes(text);
+    if (totalBytes > MAX_CONTEXT_TOTAL_BYTES) {
+      throw new DiagnosticContractError("Channel context exceeds the total byte limit.");
     }
     return {
-      user_id: message.userId == null ? null : identifier(message.userId, `Channel context user ${index}`),
-      ts: timestamp,
+      user_id: message.userId == null ? null : identifier(message.userId, `Context user ${index}`),
+      ts: message.ts,
       text
     };
   });
