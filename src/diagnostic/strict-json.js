@@ -107,14 +107,14 @@ class StrictJsonParser {
       }
       if (character === "\\") {
         this.index += 1;
-        const escape = this.text[this.index];
-        if (escape === "u") {
+        const escapeCharacter = this.text[this.index];
+        if (escapeCharacter === "u") {
           const unicode = this.text.slice(this.index + 1, this.index + 5);
           if (!/^[0-9a-fA-F]{4}$/.test(unicode)) this.fail("contains an invalid Unicode escape");
           this.index += 5;
           continue;
         }
-        if (!'"\\/bfnrt'.includes(escape ?? "")) this.fail("contains an invalid escape");
+        if (!'"\\/bfnrt'.includes(escapeCharacter ?? "")) this.fail("contains an invalid escape");
       } else if (!character || character.charCodeAt(0) < 0x20) {
         this.fail("contains an invalid control character");
       }
@@ -159,4 +159,3 @@ export function readBoundedJson(path, limit, label) {
   if (raw.length > limit) throw new DiagnosticContractError(`${label} exceeds the maximum size.`);
   return { absolutePath, parsed: new StrictJsonParser(raw.toString("utf8"), label).parse() };
 }
-
