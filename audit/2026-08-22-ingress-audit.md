@@ -146,3 +146,67 @@ only ingress. A caveat section was added.
 
 **No `Content-Type` check.** Not exploitable, since the HMAC gates the body, but
 a signed JSON body is currently fed to the form decoder rather than refused.
+
+---
+
+# Addendum — the live app, inspected 2026-08-22
+
+The code audit above was written against the repository. This section is what
+the Slack app configuration actually says, read directly from
+`api.slack.com/apps/A0BMBAMM5NJ`. It diverges from the repository in ways that
+change which findings are load-bearing.
+
+## The app has no slash commands
+
+The Slash Commands page is empty. Not `/x-ores-*`, not `/ores-*`, not `/x-*`,
+not `/my-*` — nothing. The manifest tracked in `ai-agent-bridge/slack-app/` was
+written, tested against, and documented, but never applied to the app.
+
+Everything in `docs/slack-ores-commands.md` describing six working commands
+described an intended state, not an observed one.
+
+## Socket Mode is enabled, and the manifest says it is not
+
+The Interactivity & Shortcuts page reports "Socket Mode is enabled. You won't
+need to specify a Request URL." The reviewed manifest carried
+`socket_mode_enabled: false`, and `docs/slack-ingress-security.md` presented the
+signed Request URL as the production posture.
+
+This inverts the weight of the Socket Mode caveat added above. It was written as
+a documentation gap about an opt-in transport that was off by default. In the
+live app it is the *only* configured transport — so on the app as it stands
+today, there is no per-request HMAC and no replay window at all. The signature
+verification the audit spent most of its effort confirming is correct is, on the
+live configuration, not on the path.
+
+## The Request URL endpoint is not serving
+
+`https://api.fiducia.cloud/readyz` returns Cloudflare **522 Connection timed
+out**. DNS resolves to Cloudflare and the CDN edge answers, but no origin
+completes the request. Nothing is deployed behind that hostname.
+
+## What follows
+
+Socket Mode is the only transport that can work today, and it needs the two
+commands created before anything at all happens. The repository now carries both
+configurations as generated artifacts — `app/manifest.socket-mode.yaml` and
+`app/manifest.request-url.yaml` — rendered from one source so the command set
+cannot drift between them, plus contract checks that fail if a socket manifest
+carries a request URL (Slack fails such a command with `invalid_url`) or if
+either manifest disagrees with the handler.
+
+Two audit items change priority given this configuration:
+
+**Identity pinning matters more, not less.** Socket Mode has no signature, so
+`api_app_id` and `team_id` are a larger share of what stands between the handler
+and an unintended payload. The pinning fix above applies to both transports —
+socket frames are re-encoded into form bytes and pushed through the same
+`validate_slash_envelope` — and it should be treated as required configuration,
+not a hardening nicety.
+
+**The socket path has no route to cross-check against.** On HTTP the provider is
+recovered from the route and then re-derived from the signed `command` field,
+with a mismatch refused. A socket frame has no path, so `Provider::from_command`
+is the sole authority and a stale mapping drops frames silently rather than
+erroring. `scripts/verify_contract.py` in `slack-ores-integrations` guards this
+by requiring the command map and the route table to agree.

@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Enforce the Slack slash-command contract across the manifest and the handler.
+"""Enforce the Slack slash-command contract across both transports and the handler.
 
-Slack decides which URL a command posts to; the service decides which provider a
-URL means. Those two decisions live in different repositories, and nothing at
-runtime tells you when they disagree — a command simply reaches the wrong model,
-or 404s, or silently keeps working under a name you thought you retired.
+Three things have to agree and nothing at runtime tells you when they don't:
 
-This script is the missing link. It reads the manifest in this repository and the
-Rust handler in ai-agent-bridge and fails if they do not agree.
+  * app/app.json          -- the command set you intend
+  * the two manifests     -- what Slack is configured to do, per transport
+  * the Rust handler      -- what the service will actually accept
+
+A disagreement does not raise an error. A command reaches the wrong model, or
+404s, or keeps working under a name you thought you retired. This script reads
+all three and fails when they diverge.
 
     python3 scripts/verify_contract.py --bridge ../ai-agent-bridge
 
@@ -17,30 +19,12 @@ Exit status is 0 when every check passes, 1 otherwise.
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import sys
 from pathlib import Path
 
-# The reviewed namespace. One command, one request URL, one provider.
-NAMESPACE = "/x-ores-"
-EXPECTED = {
-    "/x-ores-claude": "Claude",
-    "/x-ores-chatgpt": "Chatgpt",
-}
-
-# Every name the workspace used before the namespace. These must not appear as a
-# live command, a route, or a provider mapping anywhere.
-RETIRED = [
-    "/ores-claude",
-    "/ores-chatgpt",
-    "/x-claude",
-    "/x-chatgpt",
-    "/my-claude",
-    "/my-chatgpt",
-]
-
-INSTALLED_APP_ID = "A0BMBAMM5NJ"
-INSTALLED_TEAM_ID = "T01B3C83PMK"
+ROOT = Path(__file__).resolve().parent.parent
 
 
 class Report:
@@ -55,85 +39,173 @@ class Report:
         else:
             print(f"  FAIL  {label}" + (f"\n          {detail}" if detail else ""))
             self.failures.append(label)
-        return ok
+        return bool(ok)
+
+    def section(self, title: str) -> None:
+        print(f"\n{title}")
 
 
-def parse_manifest(text: str) -> tuple[dict[str, str], list[str]]:
-    """Return {command: request_url} and the ordered list of command names.
+def parse_manifest(text: str) -> dict:
+    """Small hand parser for the manifest subset we render.
 
-    Deliberately a small hand parser rather than a YAML dependency: this script
-    has to run in CI before anything else is installed.
+    Deliberately not PyYAML: this has to run in CI before anything is installed,
+    and the shapes involved are fixed by our own renderer.
     """
-    commands: dict[str, str] = {}
-    order: list[str] = []
-    current: str | None = None
-    for line in text.splitlines():
+    commands: list[dict] = []
+    scopes: list[str] = []
+    settings: dict[str, str] = {}
+    interactivity_url: str | None = None
+    current: dict | None = None
+    in_scopes = False
+
+    for raw in text.splitlines():
+        line = raw.split("#", 1)[0].rstrip() if not raw.strip().startswith("#") else ""
         stripped = line.strip()
+        if not stripped:
+            continue
         if stripped.startswith("- command:"):
-            current = stripped.split(":", 1)[1].strip()
-            order.append(current)
+            current = {"command": stripped.split(":", 1)[1].strip()}
+            commands.append(current)
+            in_scopes = False
         elif stripped.startswith("url:") and current is not None:
-            commands[current] = stripped.split(":", 1)[1].strip()
-            current = None
-    return commands, order
+            current["url"] = stripped.split(":", 1)[1].strip()
+        elif stripped == "bot:":
+            in_scopes = True
+        elif in_scopes and stripped.startswith("- "):
+            scopes.append(stripped[2:].strip())
+        elif stripped.startswith("request_url:"):
+            interactivity_url = stripped.split(":", 1)[1].strip()
+            in_scopes = False
+        elif ":" in stripped and not stripped.startswith("-"):
+            key, _, value = stripped.partition(":")
+            value = value.strip()
+            if value:
+                settings[key.strip()] = value
+            in_scopes = False
+    return {
+        "commands": commands,
+        "scopes": scopes,
+        "settings": settings,
+        "interactivity_url": interactivity_url,
+        "raw": text,
+        # Comments carry prose about tokens ("no url while xapp- auth is in
+        # play"); secret scanning must look at the document, not the commentary.
+        "body": "\n".join(
+            line for line in text.splitlines() if not line.lstrip().startswith("#")
+        ),
+    }
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--bridge",
-        type=Path,
-        default=Path("../ai-agent-bridge"),
-        help="path to the ai-agent-bridge checkout holding the handler",
-    )
-    parser.add_argument(
-        "--manifest",
-        type=Path,
-        default=Path(__file__).resolve().parent.parent / "app" / "manifest.yaml",
-    )
+    parser.add_argument("--bridge", type=Path, default=Path("../ai-agent-bridge"))
     args = parser.parse_args()
 
     report = Report()
+    source = json.loads((ROOT / "app" / "app.json").read_text())
 
-    if not args.manifest.is_file():
-        print(f"manifest not found: {args.manifest}", file=sys.stderr)
-        return 1
+    expected_commands = {"/" + c["name"]: c["provider"] for c in source["commands"]}
+    retired = ["/" + name for name in source["retired_commands"]]
+    base = source["request_url_base"]
 
-    manifest_text = args.manifest.read_text()
-    commands, order = parse_manifest(manifest_text)
+    manifests = {
+        "request-url": ROOT / "app" / "manifest.request-url.yaml",
+        "socket-mode": ROOT / "app" / "manifest.socket-mode.yaml",
+    }
+    parsed: dict[str, dict] = {}
+    for transport, path in manifests.items():
+        if not path.is_file():
+            print(f"missing manifest: {path} -- run: make render", file=sys.stderr)
+            return 1
+        parsed[transport] = parse_manifest(path.read_text())
 
-    print("manifest")
-    report.check(
-        set(commands) == set(EXPECTED),
-        "declares exactly the reviewed commands",
-        f"expected {sorted(EXPECTED)}, found {sorted(commands)}",
-    )
-    report.check(
-        len(order) == len(set(order)),
-        "declares no command twice",
-        f"duplicates in {order}",
-    )
-    for command, url in sorted(commands.items()):
+    # ---------------------------------------------------------------- manifests
+    for transport, manifest in parsed.items():
+        report.section(f"manifest: {transport}")
+        names = [c["command"] for c in manifest["commands"]]
         report.check(
-            url.endswith("/slack/commands/" + command.lstrip("/")),
-            f"{command} posts to a path that matches its name",
-            f"url is {url}",
+            set(names) == set(expected_commands),
+            "declares exactly the commands in app/app.json",
+            f"expected {sorted(expected_commands)}, found {sorted(names)}",
         )
-    report.check(
-        len(set(commands.values())) == len(commands),
-        "no two commands share a request URL",
-        "Slack routes by path and the service reads the provider from the path, "
-        "so a shared URL would cross providers",
-    )
-    for retired in RETIRED:
+        report.check(len(names) == len(set(names)), "declares no command twice", str(names))
         report.check(
-            f"command: {retired}" not in manifest_text,
-            f"retired name {retired} is absent",
+            manifest["scopes"] == source["bot_scopes"],
+            "bot scopes match app/app.json",
+            f"found {manifest['scopes']}",
         )
-    report.check("token_rotation_enabled: true" in manifest_text, "token rotation stays on")
-    report.check("xoxb-" not in manifest_text, "no bot token is committed")
-    report.check("signing_secret" not in manifest_text, "no signing secret is committed")
+        for name in retired:
+            report.check(
+                f"command: {name}\n" not in manifest["raw"] + "\n",
+                f"retired name {name} is absent",
+            )
+        report.check(
+            manifest["settings"].get("token_rotation_enabled") == "true",
+            "token rotation stays on",
+        )
+        for marker, label in [
+            ("xoxb-", "no bot token is committed"),
+            ("xapp-", "no app token is committed"),
+            ("xoxe-", "no configuration token is committed"),
+            ("signing_secret", "no signing secret is committed"),
+        ]:
+            report.check(marker not in manifest["body"], label)
 
+        if transport == "request-url":
+            report.check(
+                manifest["settings"].get("socket_mode_enabled") == "false",
+                "socket_mode_enabled is false",
+            )
+            for command in manifest["commands"]:
+                name = command["command"].lstrip("/")
+                report.check(
+                    command.get("url") == f"{base}/slack/commands/{name}",
+                    f"{command['command']} posts to a path matching its name",
+                    f"url is {command.get('url')!r}",
+                )
+            urls = [c.get("url") for c in manifest["commands"]]
+            report.check(
+                len(set(urls)) == len(urls),
+                "no two commands share a request URL",
+                "the service reads the provider from the path, so a shared URL "
+                "would make the path ambiguous",
+            )
+            report.check(
+                manifest["interactivity_url"] == f"{base}/slack/interactions",
+                "interactivity request URL is set",
+            )
+        else:
+            # Slack fails a command with 'invalid_url' if a URL is set while
+            # Socket Mode is on. This is the check that keeps the two renders
+            # from being accidentally interchangeable.
+            report.check(
+                manifest["settings"].get("socket_mode_enabled") == "true",
+                "socket_mode_enabled is true",
+            )
+            report.check(
+                all("url" not in c for c in manifest["commands"]),
+                "no slash command carries a request URL",
+                "Slack rejects a command with a URL while Socket Mode is on",
+            )
+            report.check(
+                manifest["interactivity_url"] is None,
+                "no interactivity request URL",
+            )
+
+    # ------------------------------------------------------- transport agreement
+    report.section("the two transports describe the same app")
+    a, b = parsed["request-url"], parsed["socket-mode"]
+    report.check(
+        [c["command"] for c in a["commands"]] == [c["command"] for c in b["commands"]],
+        "identical command sets, in identical order",
+    )
+    report.check(a["scopes"] == b["scopes"], "identical bot scopes")
+    report.check(
+        a["settings"].get("name", "") == b["settings"].get("name", ""),
+        "identical app name",
+    )
+
+    # ------------------------------------------------------------------- handler
     handler = args.bridge / "src" / "slack_commands_parts"
     if not handler.is_dir():
         print(f"\nhandler sources not found under {handler}", file=sys.stderr)
@@ -142,67 +214,94 @@ def main() -> int:
 
     part1 = (handler / "part1.rs").read_text()
     part6 = (handler / "part6.rs").read_text()
-    source = "\n".join(p.read_text() for p in sorted(handler.glob("part*.rs")))
+    part15 = (handler / "part15.rs").read_text()
+    everything = "\n".join(p.read_text() for p in sorted(handler.glob("part*.rs")))
 
-    print("\nhandler: command to provider")
-    mapping = dict(
-        re.findall(r'"(/[a-z0-9-]+)" => Some\(Self::(\w+)\)', part1)
-    )
+    report.section("handler: command to provider")
+    mapping = dict(re.findall(r'"(/[a-z0-9-]+)" => Some\(Self::(\w+)\)', part1))
     report.check(
-        mapping == EXPECTED,
+        mapping == expected_commands,
         "Provider::from_command maps exactly the reviewed commands",
         f"found {mapping}",
     )
 
-    print("\nhandler: routes")
+    report.section("handler: HTTP routes (Request URL transport)")
     routes = set(re.findall(r'\.route\("(/slack/commands/[a-z0-9-]+)"', part6))
-    dispatch = dict(
-        re.findall(r'"(/slack/commands/[a-z0-9-]+)" => Provider::(\w+)', part6)
-    )
-    expected_routes = {u.split("fiducia.cloud", 1)[-1] for u in commands.values()}
-    report.check(
-        routes == expected_routes,
-        "registered routes match the manifest request URLs",
-        f"router has {sorted(routes)}, manifest wants {sorted(expected_routes)}",
-    )
-    report.check(
-        set(dispatch) == routes,
-        "every registered route resolves to a provider",
-        f"routes {sorted(routes)} vs dispatch {sorted(dispatch)}",
-    )
-
-    print("\ncross-check: a command and its URL must mean the same provider")
-    for command, url in sorted(commands.items()):
-        path = url.split("fiducia.cloud", 1)[-1]
-        by_command = mapping.get(command)
-        by_path = dispatch.get(path)
+    dispatch = dict(re.findall(r'"(/slack/commands/[a-z0-9-]+)" => Provider::(\w+)', part6))
+    wanted = {c["url"].removeprefix(base) for c in a["commands"]}
+    report.check(routes == wanted, "routes match the request-url manifest", f"{sorted(routes)} vs {sorted(wanted)}")
+    report.check(set(dispatch) == routes, "every route resolves to a provider")
+    for command, provider in sorted(expected_commands.items()):
+        path = f"/slack/commands/{command.lstrip('/')}"
         report.check(
-            by_command is not None and by_command == by_path,
-            f"{command} -> {by_command} and {path} -> {by_path} agree",
+            mapping.get(command) == provider == dispatch.get(path),
+            f"{command} and {path} both mean {provider}",
+            f"command->{mapping.get(command)}, path->{dispatch.get(path)}",
         )
 
-    print("\nretired names are gone from the handler")
-    for retired in RETIRED:
-        live_arm = f'"{retired}" =>' in part1
-        live_route = f'.route("/slack/commands/{retired.lstrip("/")}"' in part6
-        report.check(not live_arm, f"{retired} has no provider arm")
-        report.check(not live_route, f"/slack/commands/{retired.lstrip('/')} is not routed")
+    report.section("handler: Socket Mode transport")
+    report.check(
+        "fn socket_expected_provider" in part15,
+        "a socket frame derives its provider from the command field",
+    )
+    report.check(
+        "validate_slash_envelope" in part15,
+        "socket frames go through the same envelope validation as HTTP",
+    )
+    report.check(
+        "SlashCommand::parse" in part15,
+        "socket frames go through the same command parse as HTTP",
+    )
+    report.check(
+        "SLACK_ACK_DEADLINE" in part15,
+        "the socket path enforces the same acknowledgement deadline",
+    )
+    report.check(
+        'if app.config.socket_mode {' in part6 and "axum::serve" in part6,
+        "both transports can run in one process",
+        "the HTTP listener must stay mounted when Socket Mode is on",
+    )
+    report.check(
+        "xapp-" in part15,
+        "the app-level token shape is validated at startup, not at connect",
+    )
 
-    print("\nregression guards still present in the handler")
-    guards = [
+    report.section("retired names are gone from the handler")
+    for name in retired:
+        report.check(f'"{name}" =>' not in part1, f"{name} has no provider arm")
+        report.check(
+            f'.route("/slack/commands/{name.lstrip("/")}"' not in part6,
+            f"/slack/commands/{name.lstrip('/')} is not routed",
+        )
+
+    report.section("ingress regression guards")
+    for needle, label in [
         ("allow_unpinned_identity", "identity pinning is opt-out, not bind-address inferred"),
         ("spawn_blocking", "the run-journal fsync stays off the async runtime"),
         ("MAX_FORM_FIELDS", "the form parser has a field ceiling"),
         ("fn log_safe", "remote-controlled log fields are bounded and sanitised"),
         ("verify_slice", "the signature comparison is constant time"),
         ("abs_diff", "the replay window is bounded in both directions"),
-    ]
-    for needle, label in guards:
-        report.check(needle in source, label)
+    ]:
+        report.check(needle in everything, label)
 
-    print("\ninstalled app identity")
-    report.check(INSTALLED_APP_ID in source, f"app id {INSTALLED_APP_ID} is pinned in tests")
-    report.check(INSTALLED_TEAM_ID in source, f"team id {INSTALLED_TEAM_ID} is pinned in tests")
+    report.section("the bridge's manifest copy has not drifted")
+    bridge_manifest = args.bridge / "slack-app" / "manifest.yaml"
+    if bridge_manifest.is_file():
+        # The handler include_str!s this file for its own contract test, so a
+        # divergent copy means the two repositories test different things.
+        report.check(
+            bridge_manifest.read_text()
+            == (ROOT / "app" / "manifest.request-url.yaml").read_text(),
+            "ai-agent-bridge/slack-app/manifest.yaml matches the request-url render",
+            "copy app/manifest.request-url.yaml over it",
+        )
+    else:
+        report.check(False, "ai-agent-bridge/slack-app/manifest.yaml exists")
+
+    report.section("installed app identity")
+    report.check(source["app_id"] in everything, f"app id {source['app_id']} is pinned in tests")
+    report.check(source["team_id"] in everything, f"team id {source['team_id']} is pinned in tests")
 
     print()
     if report.failures:

@@ -1,0 +1,51 @@
+# GENERATED from app/app.json by scripts/render_manifest.py -- do not edit.
+#
+# Transport: Socket Mode. The handler opens an OUTBOUND WebSocket and Slack
+# pushes commands down it. No public endpoint, DNS record, TLS certificate
+# or inbound firewall rule is needed.
+#
+# The trade, stated plainly: frames carry no X-Slack-Signature and no
+# timestamp, so there is no per-request HMAC and no replay window. The
+# connection's xapp- token is the whole of the authentication. Everything
+# downstream -- provider agreement, app/team pinning, channel policy, the
+# run journal -- is shared with the Request URL path.
+#
+# Slash commands carry NO url here. Slack fails a command with 'invalid_url'
+# if one is set while Socket Mode is on.
+
+display_information:
+  name: alex-main-agent
+  description: Scoped ORESoftware work intake for Claude and ChatGPT through the AI bridge and coordinator.
+  background_color: "#2C2D30"
+
+features:
+  bot_user:
+    display_name: alex-main-agent
+    always_online: false
+  slash_commands:
+    - command: /x-ores-claude
+      description: Submit a scoped ORESoftware task to Claude.
+      usage_hint: "[task] or leave empty to open the scoped task menu"
+      should_escape: true
+    - command: /x-ores-chatgpt
+      description: Submit a scoped ORESoftware task to ChatGPT.
+      usage_hint: "[task] or leave empty to open the scoped task menu"
+      should_escape: true
+
+oauth_config:
+  scopes:
+    bot:
+      - commands
+      - chat:write
+      - channels:history
+      - groups:history
+      - usergroups:read
+
+settings:
+  interactivity:
+    is_enabled: true
+    # No request_url: Socket Mode delivers interactions over the socket.
+  org_deploy_enabled: false
+  socket_mode_enabled: true
+  token_rotation_enabled: true
+  is_mcp_enabled: false
