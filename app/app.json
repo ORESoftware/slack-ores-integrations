@@ -1,0 +1,49 @@
+{
+  "_comment": [
+    "Single source of truth for the alex-main-agent Slack app.",
+    "",
+    "A Slack app runs ONE transport at a time. With Socket Mode enabled, a slash",
+    "command that still carries a request URL fails at invocation with",
+    "'invalid_url' -- so the two transports need genuinely different app configs",
+    "and no single manifest can serve both.",
+    "",
+    "Both manifests are rendered from this file by scripts/render_manifest.py so",
+    "the commands, scopes and descriptions cannot drift apart between them.",
+    "Edit this file, then run: make render"
+  ],
+  "name": "alex-main-agent",
+  "description": "Scoped ORESoftware work intake for Claude and ChatGPT through the AI bridge and coordinator.",
+  "background_color": "#2C2D30",
+  "request_url_base": "https://api.fiducia.cloud",
+  "app_id": "A0BMBAMM5NJ",
+  "team_id": "T01B3C83PMK",
+  "commands": [
+    {
+      "name": "x-ores-claude",
+      "provider": "Claude",
+      "description": "Submit a scoped ORESoftware task to Claude.",
+      "usage_hint": "[task] or leave empty to open the scoped task menu"
+    },
+    {
+      "name": "x-ores-chatgpt",
+      "provider": "Chatgpt",
+      "description": "Submit a scoped ORESoftware task to ChatGPT.",
+      "usage_hint": "[task] or leave empty to open the scoped task menu"
+    }
+  ],
+  "bot_scopes": [
+    "commands",
+    "chat:write",
+    "channels:history",
+    "groups:history",
+    "usergroups:read"
+  ],
+  "retired_commands": [
+    "ores-claude",
+    "ores-chatgpt",
+    "x-claude",
+    "x-chatgpt",
+    "my-claude",
+    "my-chatgpt"
+  ]
+}
