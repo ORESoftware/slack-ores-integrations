@@ -274,6 +274,47 @@ def main() -> int:
             f"/slack/commands/{name.lstrip('/')} is not routed",
         )
 
+    report.section("struct literal field placement")
+    # There is no compiler in some environments this runs in, and a field pasted
+    # into the wrong struct literal is invisible to every other check here. This
+    # one caught `allow_unpinned_identity` -- a Config field -- landing inside
+    # BudgetPolicy literals, which shares the `max_concurrent_runs` field name.
+    BUDGET_POLICY_FIELDS = {
+        "max_concurrent_runs",
+        "max_runtime_secs",
+        "max_tokens",
+        "max_spend_cents",
+        "max_retries",
+    }
+    sources = sorted(handler.glob("part*.rs")) + sorted(
+        (args.bridge / "tests").glob("slack*.rs")
+    )
+    misplaced = []
+    for path in sources:
+        lines = path.read_text().split("\n")
+        depth = None
+        for number, line in enumerate(lines, 1):
+            stripped = line.strip()
+            if "BudgetPolicy {" in stripped and stripped.endswith("{"):
+                depth = len(line) - len(line.lstrip())
+                continue
+            if depth is None:
+                continue
+            if not stripped:
+                continue
+            indent = len(line) - len(line.lstrip())
+            if indent <= depth:
+                depth = None
+                continue
+            name = stripped.split(":", 1)[0].strip()
+            if name and name.isidentifier() and name not in BUDGET_POLICY_FIELDS:
+                misplaced.append(f"{path.name}:{number} `{name}` is not a BudgetPolicy field")
+    report.check(
+        not misplaced,
+        "no foreign field appears inside a BudgetPolicy literal",
+        "; ".join(misplaced),
+    )
+
     report.section("ingress regression guards")
     for needle, label in [
         ("allow_unpinned_identity", "identity pinning is opt-out, not bind-address inferred"),
