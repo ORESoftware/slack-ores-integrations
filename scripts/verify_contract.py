@@ -274,6 +274,65 @@ def main() -> int:
             f"/slack/commands/{name.lstrip('/')} is not routed",
         )
 
+    report.section("reply contract (Slack renders a body only on HTTP 200)")
+    # Slack: "Your URL should respond with a HTTP 200 'OK' status code. Any
+    # other flavor of response will result in a user-facing error." A reply
+    # carrying text on any other status is text nobody will ever read.
+    report.check(
+        "fn ephemeral(text: &str) -> Response" in part6,
+        "ephemeral() cannot be given a status code",
+        "it must always answer 200 and carry the outcome in the body",
+    )
+    report.check(
+        "ephemeral(StatusCode::" not in part6,
+        "no reply is sent with a non-200 status",
+    )
+    report.check(
+        "fn reject(status: StatusCode) -> Response" in part6,
+        "refusals aimed at Slack have a separate, body-less path",
+    )
+    report.check(
+        "async fn accept(app: Arc<App>, request: RunRequest) -> Accepted" in part6,
+        "accept() returns a typed outcome, not a Response",
+        "inferring success from an HTTP status breaks once every reply is 200",
+    )
+    report.check(
+        "accepted.status() == StatusCode::OK" not in part6,
+        "no handler infers success from a response status",
+    )
+
+    report.section("Socket Mode parity")
+    interactive = part15.split('"interactive" => {', 1)
+    report.check(len(interactive) > 1, "the socket loop has an interactive arm")
+    if len(interactive) > 1:
+        arm = interactive[1].split("_ => None,", 1)[0]
+        report.check(
+            "handle_interaction" in arm,
+            "modal submissions over the socket reach the shared handler",
+            "this arm was a no-op, so every submission was dropped silently",
+        )
+        report.check(
+            "let _ = self;" not in arm,
+            "the interactive arm is not a no-op",
+        )
+    report.check(
+        "async fn handle_interaction" in part6,
+        "the modal path is shared rather than inlined in the HTTP handler",
+    )
+    report.check(
+        "fn interaction_payload" in "\n".join(p.read_text() for p in sorted(handler.glob("part*.rs"))),
+        "a socket frame decodes its interaction without a form wrapper",
+    )
+    report.check(
+        "SOCKET_MODE_READ_IDLE" in part15 and "timeout(SOCKET_MODE_READ_IDLE" in part15,
+        "the socket read has an idle timeout",
+        "without it a blackholed connection never reconnects and the service dies silently",
+    )
+    report.check(
+        "SOCKET_MODE_HEALTHY_AFTER" in part15,
+        "backoff resets only after a connection proves healthy",
+    )
+
     report.section("struct literal field placement")
     # There is no compiler in some environments this runs in, and a field pasted
     # into the wrong struct literal is invisible to every other check here. This
