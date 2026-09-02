@@ -39,7 +39,7 @@
     "@types/node": "26.2.0",
     "typescript": "7.0.2",
     "playwright": "1.62.1",
-    "puppeteer-core": "25.8.0",
-    "selenium-webdriver": "4.47.0"
+    "puppeteer-core": "25.9.0",
+    "selenium-webdriver": "4.48.0"
   }
 }
