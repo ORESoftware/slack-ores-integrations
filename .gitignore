@@ -9,3 +9,7 @@ dist/
 .slack/apps.*.json
 .slack/.local/
 tests/e2e/artifacts/
+
+# Local temporary directories and repository-owned worktrees
+tmp/
+temp/
