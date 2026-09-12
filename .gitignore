@@ -13,3 +13,5 @@ tests/e2e/artifacts/
 # Local temporary directories and repository-owned worktrees
 tmp/
 temp/
+# --- carried over from the grafted branch rescue/orphan-35d2251b9164-support-both-transports-as-first-class-r ---
+*.tar.gz
