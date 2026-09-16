@@ -36,7 +36,7 @@
   "devDependencies": {
     "@biomejs/biome": "2.5.12",
     "@slack/cli-hooks": "2.0.0",
-    "@types/node": "26.4.1",
+    "@types/node": "26.5.1",
     "typescript": "7.0.2",
     "playwright": "1.63.0",
     "puppeteer-core": "25.10.0",
