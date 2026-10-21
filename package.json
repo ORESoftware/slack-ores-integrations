@@ -30,7 +30,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "0.133.0",
     "@slack/bolt": "5.1.0",
-    "dotenv": "18.0.7",
+    "dotenv": "18.0.8",
     "openai": "7.32.0"
   },
   "devDependencies": {
